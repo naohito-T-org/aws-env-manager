@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+set -E -e -o pipefail -u
+
+# ----------------------------------------------------------
+# @description
+# - パラメーターストアに対応したenvユーティリティスクリプト
+# - このファイルには2つの実行コマンドが存在しております。
+# - 各実行コマンドの exampleは 実行コマンド前のコメントを参照すること
+# - ※このコマンド実行には `jq` と `aws` コマンドが必要です
+# - ※local実行の場合は、aws-vaultを使用し実行してください
+# ----------------------------------------------------------
+
+# --------------------
+# Variable.
+# --------------------
+
+OUTPUT_ENV_PATH=${OUTPUT_ENV_PATH:-"$(pwd)"}
+
+ENV_FILE_PATH=${ENV_FILE_PATH:-"$(pwd)"}
+
+SAMPLE_FILE_PATH=${SAMPLE_FILE_PATH:-"$(pwd)"}
+
+ENV_FILE_NAME=${ENV_FILE_NAME:-"/.env.local"}
+
+SAMPLE_FILE_NAME="/.env.sample"
+
+PARAMETER_STORE=${PARAMETER_STORE:-"/alb/local/backend/env"}
+
+# --------------------
+# Methods.
+# --------------------
+
+function _recRFC3339() {
+  date "+%Y-%m-%dT%H:%M:%S%z" | sed "s/\(..\)$/:\1/";
+}
+
+function rec_success() {
+  echo "$*" | awk "{print   \"$(_recRFC3339) [\\033[0;32mSUCCESS\\033[0m] \"\$0\"\"}";
+}
+
+function rec_info() {
+  echo "$*" | awk "{print   \"$(_recRFC3339) [\\033[0;32mINFO\\033[0m] \"\$0\"\"}";
+}
+
+function rec_warning() {
+  echo "$*" | awk "{print   \"$(_recRFC3339) [\\033[0;33mWARNING\\033[0m] \"\$0\"\"}";
+}
+
+function rec_error() {
+  echo "$*" | awk "{print   \"$(_recRFC3339) [\\033[0;31mERROR\\033[0m] \"\$0\"\"}";
+}
+
+function prepare_check() {
+  if ! (type "jq" > /dev/null 2>&1); then
+    rec_error "jq コマンドをインストールしてください。"
+    exit 1
+  fi
+
+  if ! (type "aws" > /dev/null 2>&1); then
+    rec_error "aws コマンドをインストールしてください。"
+    exit 1
+  fi
+}
+
+function usage {
+  cat <<EOM
+Usage: $(basename "$0") [OPTION]...
+  [-p] required target parameter-store name
+  [-h] optional display help
+  [-o] optional env.local output dir           default current dir
+  [-e] optional target .env file dir           default current dir
+  [-n] optional target .env file name          default .env.local
+  [-s] optional target .env.sample dir         default current dir
+EOM
+  exit 1
+}
+
+# ------------------------------------------------------------------------
+# @desc
+# - パラメーターストアから値を取得し.env.localを配置する
+# ------------------------------------------------------------------------
+
+function task_fetch_parameter_env() {
+  rec_info "Parameter storeから取得実行します。"
+  rec_info "対象パラメータストア: ${PARAMETER_STORE}"
+  rec_info "出力先: ${OUTPUT_ENV_PATH}${ENV_FILE_NAME}"
+
+  eval "$1" > "${OUTPUT_ENV_PATH}${ENV_FILE_NAME}"
+
+  rec_success "取得完了しました。"
+}
+
+# ------------------------------------------------------------------------
+# @desc
+# - パラメーターストアから値を取得し.env.sampleに指定された値があるか確認する
+# ------------------------------------------------------------------------
+function task_check_parameter_env() {
+  if ! [ -e "$SAMPLE_FILE_PATH$SAMPLE_FILE_NAME" ]; then
+    rec_error "$SAMPLE_FILE_NAME ファイルが存在しません"
+    exit 1
+  fi
+
+  rec_info "Env checkを実行します。"
+  rec_info "対象 parameter-store: ${PARAMETER_STORE}"
+  rec_info "対象 sample Env: ${SAMPLE_FILE_PATH}${SAMPLE_FILE_NAME}"
+
+  local _sample_env_keys
+  local _parameterstore_keys
+
+  _sample_env_keys="$(cat < "${SAMPLE_FILE_PATH}${SAMPLE_FILE_NAME}" | grep -v -e '^\s*#' -e '^\s*$'| awk -F '=' '{ print $1 }')"
+  _parameterstore_keys=$(eval "$1" | grep -v -e '^\s*#' -e '^\s*$'| awk -F '=' '{ print $1 }')
+
+  # `.env.sample`にkeyが設定されていなく、parameter-storeだけに設定されている値がある場合は`warning`を出力する
+  for key in $_parameterstore_keys; do
+    if echo "${_sample_env_keys}" | awk -F '=' '{ print $1 }' | grep -x "$key" > /dev/null 2>&1; then
+      continue
+    fi
+
+    rec_warning "$key is empty. パラメーターストア ${PARAMETER_STORE} に設定されている値が ${SAMPLE_FILE_NAME} に設定されていません。"
+  done
+
+  # .sample.envにある値がparameter-storeに設定されているか確認する
+  for key in $_sample_env_keys; do
+    if echo "${_parameterstore_keys}" | awk -F '=' '{ print $1 }' | grep -x "$key" > /dev/null 2>&1; then
+      continue
+    fi
+
+    rec_error "パラメーターストア ${PARAMETER_STORE} に値が設定されていません。"
+    rec_error "$key is empty."
+    exit 1
+  done
+
+  rec_success "${SAMPLE_FILE_NAME} に設定されている値はパラメーターストア ${PARAMETER_STORE} に設定されています。"
+}
+
+# --------------------
+# entrypoint
+# --------------------
+function entrypoint() {
+  # 必須オプション設定フラグ
+  local _IS_PARAMETER_OPTION=false
+  # 実行コマンド
+  local _COMMAND_WITH_DECRIPTION
+
+  # ------------------
+  # options parser
+  # ------------------
+  while getopts ":e:h:n:o:p:s:" opt; do
+    case "$opt" in
+      e)
+        ENV_FILE_PATH="${OPTARG}"
+        ;;
+      h)
+        usage
+        ;;
+      n)
+        ENV_FILE_NAME="${OPTARG}"
+        ;;
+      o)
+        OUTPUT_ENV_PATH="${OPTARG}"
+        ;;
+      p)
+        PARAMETER_STORE="${OPTARG}"
+        _COMMAND_WITH_DECRIPTION="aws ssm get-parameter --name $OPTARG --with-decryption | jq -r '.Parameter.Value'"
+        _IS_PARAMETER_OPTION=true
+        ;;
+      s)
+        SAMPLE_FILE_PATH="${OPTARG}"
+        ;;
+      * )
+        usage
+        ;;
+    esac
+  done
+
+  shift $((OPTIND - 1))
+
+  if ! "$_IS_PARAMETER_OPTION" ; then
+    rec_error "-pオプションは必須オプションです。"
+    exit 1
+  fi
+
+  # --------------------
+  # command handler
+  # -------------------
+  prepare_check
+
+  subcmd="${1:-nothing}"
+  case "$subcmd" in
+    "task_fetch_parameter_env" )
+      task_fetch_parameter_env "$_COMMAND_WITH_DECRIPTION"
+      exit 0 ;;
+    "task_check_parameter_env" )
+      task_check_parameter_env "$_COMMAND_WITH_DECRIPTION"
+      exit 0 ;;
+    * )
+      usage
+  esac
+}
+
+# For shellspec
+${__SOURCED__:+return}
+
+entrypoint "$@"
