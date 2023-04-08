@@ -1,0 +1,23 @@
+name: Shell-script-lint
+
+on:
+  pull_request:
+    paths:
+      - "packages/**"
+      - "!**.md"
+
+jobs:
+  parameter-store-lint:
+    strategy:
+      matrix:
+        os: [ubuntu-22.04]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Run ShellCheck
+        uses: ludeeus/action-shellcheck@master
+        with:
+          scandir: './packages'
