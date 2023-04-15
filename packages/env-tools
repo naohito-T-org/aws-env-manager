@@ -33,7 +33,7 @@ PARAMETER_STORE=""
 SUBMODULE_RELATIVE_PATH=$(git submodule status | awk '{print $2}')
 
 # このプロジェクトの.env.sampleパス
-SUBMODULE_ABSOLUTE_SAMPLE_PATH="$(realpath "${SUBMODULE_RELATIVE_PATH}/packages/parameter-store" 2>/dev/null || pwd)/.env.sample"
+SUBMODULE_ABSOLUTE_SAMPLE_PATH="$(realpath "${SUBMODULE_RELATIVE_PATH}/packages" 2>/dev/null || pwd)/.env.sample"
 
 # --------------------
 # Methods.
