@@ -14,17 +14,26 @@ set -E -e -o pipefail -u
 # Variable.
 # --------------------
 
+# envファイル出力先パス
 OUTPUT_ENV_PATH=${OUTPUT_ENV_PATH:-"$(pwd)"}
 
-ENV_FILE_PATH=${ENV_FILE_PATH:-"$(pwd)"}
-
+# .env.sampleがあるパス
 SAMPLE_FILE_PATH=${SAMPLE_FILE_PATH:-"$(pwd)"}
 
-ENV_FILE_NAME=${ENV_FILE_NAME:-"/.env.local"}
+# .envファイル名
+ENV_FILE_NAME=${ENV_FILE_NAME:-".env.local"}
 
-SAMPLE_FILE_NAME="/.env.sample"
+# .env.sample ファイル名
+SAMPLE_FILE_NAME=".env.sample"
 
-PARAMETER_STORE=${PARAMETER_STORE:-"/alb/local/backend/env"}
+# 取得するパラメーターストア
+PARAMETER_STORE=""
+
+# サブモジュールパス（導入されたプロジェクトでディレクトリ名を変えたとしても必ずこのパッケージのルートを指す）
+SUBMODULE_RELATIVE_PATH=$(git submodule status | awk '{print $2}')
+
+# このプロジェクトの.env.sampleパス
+SUBMODULE_ABSOLUTE_SAMPLE_PATH="$(realpath "${SUBMODULE_RELATIVE_PATH}/packages/parameter-store" 2>/dev/null || pwd)/.env.sample"
 
 # --------------------
 # Methods.
@@ -64,13 +73,23 @@ function prepare_check() {
 
 function usage {
   cat <<EOM
-Usage: $(basename "$0") [OPTION]...
-  [-p] required target parameter-store name
-  [-h] optional display help
-  [-o] optional env.local output dir           default current dir
-  [-e] optional target .env file dir           default current dir
-  [-n] optional target .env file name          default .env.local
-  [-s] optional target .env.sample dir         default current dir
+Usage: $ $(basename "$0") [command] [option]...
+
+Commands:
+  [task_fetch_parameter_env]  fetch parameter-store env value
+  [task_check_parameter_env]  check parameter-store env value
+
+Options:
+  [-p]  Required target parameter-store name
+  [-h]  Optional display help
+  [-o]  Optional env.local output dir
+          default current dir.
+          If an argument is set, it is relative to the current directory.
+  [-s]  Optional target .env.sample dir
+          default current dir.
+          If an argument is set, it is relative to the current directory.
+  [-n]  Optional target .env file name
+          default .env.local
 EOM
   exit 1
 }
@@ -78,14 +97,25 @@ EOM
 # ------------------------------------------------------------------------
 # @desc
 # - パラメーターストアから値を取得し.env.localを配置する
+# @example
+# - $ aws-vault exec [your-role-name] -- ./env-tools -p [your-parameter-store-name] task_fetch_parameter_env
 # ------------------------------------------------------------------------
 
 function task_fetch_parameter_env() {
   rec_info "Parameter storeから取得実行します。"
   rec_info "対象パラメータストア: ${PARAMETER_STORE}"
-  rec_info "出力先: ${OUTPUT_ENV_PATH}${ENV_FILE_NAME}"
+  rec_info "出力先: $OUTPUT_ENV_PATH/$ENV_FILE_NAME"
 
-  eval "$1" > "${OUTPUT_ENV_PATH}${ENV_FILE_NAME}"
+  eval "$1" > "$OUTPUT_ENV_PATH/$ENV_FILE_NAME"
+
+  # .envファイル出力先に `.env.sample` がない場合は配置する
+  if ! [ -e "$OUTPUT_ENV_PATH/$SAMPLE_FILE_NAME" ]; then
+    rec_info "$SAMPLE_FILE_NAME ファイルが存在しないため作成します。"
+
+    cp -ip "$SUBMODULE_ABSOLUTE_SAMPLE_PATH" "$OUTPUT_ENV_PATH"
+
+    rec_success ".env.sampleを作成しました。"
+  fi
 
   rec_success "取得完了しました。"
 }
@@ -93,21 +123,24 @@ function task_fetch_parameter_env() {
 # ------------------------------------------------------------------------
 # @desc
 # - パラメーターストアから値を取得し.env.sampleに指定された値があるか確認する
+# @example
+# - $ aws-vault exec [your-role-name] -- ./env-tools -p [your-parameter-store-name] task_check_parameter_env
 # ------------------------------------------------------------------------
 function task_check_parameter_env() {
-  if ! [ -e "$SAMPLE_FILE_PATH$SAMPLE_FILE_NAME" ]; then
+  if ! [ -e "$SAMPLE_FILE_PATH/$SAMPLE_FILE_NAME" ]; then
     rec_error "$SAMPLE_FILE_NAME ファイルが存在しません"
     exit 1
   fi
 
   rec_info "Env checkを実行します。"
   rec_info "対象 parameter-store: ${PARAMETER_STORE}"
-  rec_info "対象 sample Env: ${SAMPLE_FILE_PATH}${SAMPLE_FILE_NAME}"
+  rec_info "対象 .env.sample: ${SAMPLE_FILE_PATH}/${SAMPLE_FILE_NAME}"
 
   local _sample_env_keys
   local _parameterstore_keys
+  local _has_error=false
 
-  _sample_env_keys="$(cat < "${SAMPLE_FILE_PATH}${SAMPLE_FILE_NAME}" | grep -v -e '^\s*#' -e '^\s*$'| awk -F '=' '{ print $1 }')"
+  _sample_env_keys="$(cat < "${SAMPLE_FILE_PATH}/${SAMPLE_FILE_NAME}" | grep -v -e '^\s*#' -e '^\s*$'| awk -F '=' '{ print $1 }')"
   _parameterstore_keys=$(eval "$1" | grep -v -e '^\s*#' -e '^\s*$'| awk -F '=' '{ print $1 }')
 
   # `.env.sample`にkeyが設定されていなく、parameter-storeだけに設定されている値がある場合は`warning`を出力する
@@ -125,12 +158,15 @@ function task_check_parameter_env() {
       continue
     fi
 
-    rec_error "パラメーターストア ${PARAMETER_STORE} に値が設定されていません。"
-    rec_error "$key is empty."
-    exit 1
+    rec_error "$key is empty. ${SAMPLE_FILE_NAME} に設定されている値が パラメーターストア ${PARAMETER_STORE} に設定されていません。"
+    _has_error=true
   done
 
-  rec_success "${SAMPLE_FILE_NAME} に設定されている値はパラメーターストア ${PARAMETER_STORE} に設定されています。"
+  if [[ "$_has_error" == true ]]; then
+    exit 1
+  else
+    rec_success "${SAMPLE_FILE_NAME} に設定されている値はパラメーターストア ${PARAMETER_STORE} に設定されています。"
+  fi
 }
 
 # --------------------
@@ -145,11 +181,8 @@ function entrypoint() {
   # ------------------
   # options parser
   # ------------------
-  while getopts ":e:h:n:o:p:s:" opt; do
+  while getopts ":h:n:o:p:s:" opt; do
     case "$opt" in
-      e)
-        ENV_FILE_PATH="${OPTARG}"
-        ;;
       h)
         usage
         ;;
@@ -157,7 +190,7 @@ function entrypoint() {
         ENV_FILE_NAME="${OPTARG}"
         ;;
       o)
-        OUTPUT_ENV_PATH="${OPTARG}"
+        OUTPUT_ENV_PATH="$(pwd)/${OPTARG}"
         ;;
       p)
         PARAMETER_STORE="${OPTARG}"
@@ -165,7 +198,7 @@ function entrypoint() {
         _IS_PARAMETER_OPTION=true
         ;;
       s)
-        SAMPLE_FILE_PATH="${OPTARG}"
+        SAMPLE_FILE_PATH="$(pwd)/${OPTARG}"
         ;;
       * )
         usage
@@ -198,7 +231,7 @@ function entrypoint() {
   esac
 }
 
-# For shellspec
+# shellspecテスト時は以下の処理は実行しない。
 ${__SOURCED__:+return}
 
 entrypoint "$@"
