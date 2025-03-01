@@ -1,0 +1,20 @@
+name: "Fetch secret manager env"
+description: "This action set up env to secret-manager."
+author: "Naohito-T"
+
+inputs:
+  work-directory:
+    description: "Working Directory"
+    required: true
+  secret_manager_name:
+    description: "Fetch secret manager name"
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Setup env
+      run: |
+        cd ${{ inputs.work-directory }}
+        SECRET_MANAGER=${{ inputs.secret_manager_name }} ../tools/packages/secret-manager/env-tools task_fetch_secret_env
+      shell: bash

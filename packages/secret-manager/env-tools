@@ -1,0 +1,239 @@
+#!/usr/bin/env bash
+set -E -e -o pipefail -u
+
+# ----------------------------------------------------------
+# @description
+# - Secret Managerに対応したenvユーティリティスクリプト
+# - このファイルには2つの実行コマンドが存在しております。
+# - 各実行コマンドの exampleは 実行コマンド前のコメントを参照すること
+# - ※このコマンド実行には `jq` と `aws` コマンドが必要です
+# - ※local実行の場合は、aws-vaultを使用し実行してください
+# ----------------------------------------------------------
+
+# --------------------
+# Variable.
+# --------------------
+
+# envファイル出力先パス
+OUTPUT_ENV_PATH=${OUTPUT_ENV_PATH:-"$(pwd)"}
+
+# .env.sampleがあるパス
+SAMPLE_FILE_PATH=${SAMPLE_FILE_PATH:-"$(pwd)"}
+
+# .envファイル名
+ENV_FILE_NAME=${ENV_FILE_NAME:-".env.local"}
+
+# .env.sample ファイル名
+SAMPLE_FILE_NAME=".env.sample"
+
+# 取得するSecret
+SECRET_MANAGER=""
+
+# サブモジュールパス（導入されたプロジェクトでディレクトリ名を変えたとしても必ずこのパッケージのルートを指す）
+SUBMODULE_RELATIVE_PATH=$(git submodule status | awk '{print $2}')
+
+# このプロジェクトの.env.sampleパス
+SUBMODULE_ABSOLUTE_SAMPLE_PATH="$(realpath "${SUBMODULE_RELATIVE_PATH}/packages/secret-manager" 2>/dev/null || pwd)/.env.sample"
+
+# --------------------
+# Methods.
+# --------------------
+
+function _recRFC3339() {
+  date "+%Y-%m-%dT%H:%M:%S%z" | sed "s/\(..\)$/:\1/";
+}
+
+function rec_success() {
+  echo "$*" | awk "{print   \"$(_recRFC3339) [\\033[0;32mSUCCESS\\033[0m] \"\$0\"\"}";
+}
+
+function rec_info() {
+  echo "$*" | awk "{print   \"$(_recRFC3339) [\\033[0;32mINFO\\033[0m] \"\$0\"\"}";
+}
+
+function rec_warning() {
+  echo "$*" | awk "{print   \"$(_recRFC3339) [\\033[0;33mWARNING\\033[0m] \"\$0\"\"}";
+}
+
+function rec_error() {
+  echo "$*" | awk "{print   \"$(_recRFC3339) [\\033[0;31mERROR\\033[0m] \"\$0\"\"}";
+}
+
+function prepare_check() {
+  if ! (type "jq" > /dev/null 2>&1); then
+    rec_error "jq コマンドをインストールしてください。"
+    exit 1
+  fi
+
+  if ! (type "aws" > /dev/null 2>&1); then
+    rec_error "aws コマンドをインストールしてください。"
+    exit 1
+  fi
+}
+
+function usage {
+  cat <<EOM
+Usage: $ $(basename "$0") [command] [option]...
+
+Commands:
+  [task_fetch_secret_env]  fetch secret-manager env value
+  [task_check_secret_env]  check secret-manager env value
+
+Options:
+  [-p]  Required target secret-manager name
+  [-h]  Optional display help
+  [-o]  Optional env.local output dir
+          default current dir.
+          If an argument is set, it is relative to the current directory.
+  [-s]  Optional target .env.sample dir
+          default current dir.
+          If an argument is set, it is relative to the current directory.
+  [-n]  Optional target .env file name
+          default .env.local
+EOM
+  exit 1
+}
+
+# ------------------------------------------------------------------------
+# @desc
+# - Secret Managerから値を取得し.env.localを配置する
+# @example
+# - $ aws-vault exec [your-role-name] -- ./env-tools -p [your-secret-manager-name] task_fetch_secret_env
+# ------------------------------------------------------------------------
+
+function task_fetch_secret_env() {
+  rec_info "Secret Managerから取得実行します。"
+  rec_info "対象Secret Manager: ${SECRET_MANAGER}"
+  rec_info "出力先: $OUTPUT_ENV_PATH/$ENV_FILE_NAME"
+
+  eval "$1" > "$OUTPUT_ENV_PATH/$ENV_FILE_NAME"
+
+  # .envファイル出力先に `.env.sample` がない場合は配置する
+  if ! [ -e "$OUTPUT_ENV_PATH/$SAMPLE_FILE_NAME" ]; then
+    rec_info "$SAMPLE_FILE_NAME ファイルが存在しないため作成します。"
+
+    cp -ip "$SUBMODULE_ABSOLUTE_SAMPLE_PATH" "$OUTPUT_ENV_PATH"
+
+    rec_success ".env.sampleを作成しました。"
+  fi
+
+  rec_success "取得完了しました。"
+}
+
+# ------------------------------------------------------------------------
+# @desc
+# - Secret Managerから値を取得し.env.sampleに指定された値があるか確認する
+# @example
+# - $ aws-vault exec [your-role-name] -- ./env-tools -p [your-secret-store-name] task_check_secret_env
+# ------------------------------------------------------------------------
+function task_check_secret_env() {
+  if ! [ -e "$SAMPLE_FILE_PATH/$SAMPLE_FILE_NAME" ]; then
+    rec_error "$SAMPLE_FILE_NAME ファイルが存在しません"
+    exit 1
+  fi
+
+  rec_info "Env checkを実行します。"
+  rec_info "対象 secret-manager: ${SECRET_MANAGER}"
+  rec_info "対象 .env.sample: ${SAMPLE_FILE_PATH}/${SAMPLE_FILE_NAME}"
+
+  local _sample_env_keys
+  local _secretmanager_keys
+  local _has_error=false
+
+  _sample_env_keys="$(cat < "${SAMPLE_FILE_PATH}/${SAMPLE_FILE_NAME}" | grep -v -e '^\s*#' -e '^\s*$'| awk -F '=' '{ print $1 }')"
+  _secretmanager_keys=$(eval "$1" | grep -v -e '^\s*#' -e '^\s*$'| awk -F '=' '{ print $1 }')
+
+  # `.env.sample`にkeyが設定されていなく、secret-managerだけに設定されている値がある場合は`warning`を出力する
+  for key in $_secretmanager_keys; do
+    if echo "${_sample_env_keys}" | awk -F '=' '{ print $1 }' | grep -x "$key" > /dev/null 2>&1; then
+      continue
+    fi
+
+    rec_warning "$key is empty. Secret Manager ${SECRET_MANAGER} に設定されている値が ${SAMPLE_FILE_NAME} に設定されていません。"
+  done
+
+  # .sample.envにある値がsecret-managerに設定されているか確認する
+  for key in $_sample_env_keys; do
+    if echo "${_secretmanager_keys}" | awk -F '=' '{ print $1 }' | grep -x "$key" > /dev/null 2>&1; then
+      continue
+    fi
+
+    rec_error "$key is empty. ${SAMPLE_FILE_NAME} に設定されている値が Secret Manager ${SECRET_MANAGER} に設定されていません。"
+    _has_error=true
+  done
+
+  if [[ "$_has_error" == true ]]; then
+    rec_error "Secret Manager ${SECRET_MANAGER} に値が設定されていません。"
+    exit 1
+  else
+    rec_success "${SAMPLE_FILE_NAME} に設定されている値は Secret Manager ${SECRET_MANAGER} に設定されています。"
+  fi
+}
+
+# --------------------
+# entrypoint
+# --------------------
+function entrypoint() {
+  # 必須オプション設定フラグ
+  local _IS_PARAMETER_OPTION=false
+  # 実行コマンド
+  local _COMMAND_WITH_DECRIPTION
+
+  # ------------------
+  # options parser
+  # ------------------
+  while getopts ":h:n:o:p:s:" opt; do
+    case "$opt" in
+      h)
+        usage
+        ;;
+      n)
+        ENV_FILE_NAME="${OPTARG}"
+        ;;
+      o)
+        OUTPUT_ENV_PATH="$(pwd)/${OPTARG}"
+        ;;
+      p)
+        SECRET_MANAGER="${OPTARG}"
+        _COMMAND_WITH_DECRIPTION="aws secretsmanager get-secret-value --secret-id ${OPTARG} --query SecretString \
+          | jq -r 'fromjson | to_entries[] | \"\(.key)=\\\"\(.value)\\\"\"'"
+        _IS_PARAMETER_OPTION=true
+        ;;
+      s)
+        SAMPLE_FILE_PATH="$(pwd)/${OPTARG}"
+        ;;
+      * )
+        usage
+        ;;
+    esac
+  done
+
+  shift $((OPTIND - 1))
+
+  if ! "$_IS_PARAMETER_OPTION" ; then
+    rec_error "-pオプションは必須オプションです。"
+    exit 1
+  fi
+
+  # --------------------
+  # command handler
+  # -------------------
+  prepare_check
+
+  subcmd="${1:-nothing}"
+  case "$subcmd" in
+    "task_fetch_secret_env" )
+      task_fetch_secret_env "$_COMMAND_WITH_DECRIPTION"
+      exit 0 ;;
+    "task_check_secret_env" )
+      task_check_secret_env "$_COMMAND_WITH_DECRIPTION"
+      exit 0 ;;
+    * )
+      usage
+  esac
+}
+
+# shellspecテスト時は以下の処理は実行しない。
+${__SOURCED__:+return}
+
+entrypoint "$@"
