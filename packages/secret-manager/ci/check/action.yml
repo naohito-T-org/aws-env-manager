@@ -1,0 +1,20 @@
+name: "Check secret manager env"
+description: "This env checks if the OS reflects the env."
+author: "Naohito-T"
+
+inputs:
+  work-directory:
+    description: "Working Directory to env file"
+    required: true
+  secret_manager_name:
+    description: "Check secret manager name"
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Check env
+      run: |
+        cd ${{ inputs.work-directory }}
+        SECRET_MANAGER=${{ inputs.secret_manager_name }} ../tools/packages/secret-manager/env-tools task_check_secret_env
+      shell: bash

@@ -1,17 +1,19 @@
-# parameter-store-tools
+# AWS Env Manager
 
 ## Contents
 
 - [parameter-store-tools](#parameter-store-tools)
   - [Contents](#contents)
   - [Description](#description)
-  - [Provided Tools](#provided-tools)
+  - [Features](#features)
 
 ## Description
 
-Parameter-store utility tool.
+AWS Environment Variable Management & Validation Tool.  
+Fetch values from AWS Parameter Store & Secrets Manager.
+Compare them with .env files.
 
-## Provided Tools
+## Features
 
 - env check
 - env fetch
